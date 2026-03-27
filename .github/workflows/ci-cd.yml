@@ -191,8 +191,9 @@ jobs:
           directory: terraform/
           framework: terraform
           soft_fail: false
-          skip_check: CKV_AWS_39,CKV_AWS_58
+          skip_check: CKV_AWS_39,CKV_AWS_58,CKV_TF_1
           output_format: cli
+          config_file: .checkov.yml
 
       - name: Run Checkov on Kubernetes manifests
         uses: bridgecrewio/checkov-action@v12

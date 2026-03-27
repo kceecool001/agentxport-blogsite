@@ -1,7 +1,6 @@
 compact: true
 soft-fail: false
 skip-check:
-  - CKV_AWS_39
-  - CKV_AWS_58
-framework:
-  - terraform
+  - CKV_AWS_39   # Public EKS endpoint — intentional for kubectl access
+  - CKV_AWS_58   # EKS public endpoint — intentional for homelab
+  - CKV_TF_1     # Module commit hash pinning — using version ranges for community modules
