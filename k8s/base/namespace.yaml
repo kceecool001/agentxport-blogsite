@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentxport
+  labels:
+    app.kubernetes.io/part-of: agentxport
+    app.kubernetes.io/version: "1.0"

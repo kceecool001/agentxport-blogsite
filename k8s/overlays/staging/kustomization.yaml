@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agentxport-staging
+
+namePrefix: staging-
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/kceecool001/agentxport-blogsite/agentxport-backend
+    newTag: latest
+  - name: ghcr.io/kceecool001/agentxport-blogsite/agentxport-frontend
+    newTag: latest
+
+commonLabels:
+  environment: staging

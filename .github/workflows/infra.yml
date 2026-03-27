@@ -1,0 +1,258 @@
+# ==============================================================
+# AgentXport - Infrastructure Pipeline (Terragrunt)
+# ==============================================================
+# Triggers:
+#   - Push/PR to main, staging, develop touching terraform/**
+#   - Manual dispatch for plan | apply | destroy on any env
+# Branch → Environment mapping:
+#   develop  → dev
+#   staging  → staging
+#   main     → prod
+# ==============================================================
+
+name: AgentXport Infrastructure Pipeline
+
+on:
+  push:
+    branches: [main, staging, develop]
+    paths:
+      - "terraform/**"
+  pull_request:
+    branches: [main, staging, develop]
+    paths:
+      - "terraform/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      action:
+        description: "Terragrunt action"
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+
+permissions:
+  contents: read
+
+env:
+  TERRAGRUNT_VERSION: "0.67.16"
+  TERRAFORM_VERSION: "1.10.5"
+
+jobs:
+  # ==============================================================
+  # Resolve environment from branch or manual input
+  # ==============================================================
+  resolve-env:
+    name: "🔧 Resolve Environment"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      action: ${{ steps.resolve.outputs.action }}
+    steps:
+      - name: Resolve environment and action
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "action=${{ inputs.action }}" >> $GITHUB_OUTPUT
+          else
+            BRANCH="${{ github.ref_name }}"
+            case "$BRANCH" in
+              main)    ENV="prod" ;;
+              staging) ENV="staging" ;;
+              *)       ENV="dev" ;;
+            esac
+            echo "environment=$ENV" >> $GITHUB_OUTPUT
+            # PRs only plan, pushes apply
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              echo "action=plan" >> $GITHUB_OUTPUT
+            else
+              echo "action=apply" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  # ==============================================================
+  # IaC Security Scan (Checkov)
+  # ==============================================================
+  checkov:
+    name: "🛡️ Checkov Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: resolve-env
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov on Terraform modules
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          soft_fail: false
+          skip_check: CKV_AWS_39,CKV_AWS_58
+          output_format: cli
+
+  # ==============================================================
+  # Terraform Format & Validate
+  # ==============================================================
+  fmt-validate:
+    name: "📋 Format & Validate"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: resolve-env
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive terraform/
+
+  # ==============================================================
+  # Terragrunt Plan
+  # ==============================================================
+  plan:
+    name: "📝 Plan (${{ needs.resolve-env.outputs.environment }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [resolve-env, checkov, fmt-validate]
+    environment: ${{ needs.resolve-env.outputs.environment }}
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Setup Terragrunt
+        run: |
+          wget -qO /usr/local/bin/terragrunt \
+            https://github.com/gruntwork-io/terragrunt/releases/download/v${{ env.TERRAGRUNT_VERSION }}/terragrunt_linux_amd64
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Run-All Plan
+        id: plan
+        working-directory: terraform/live/${{ needs.resolve-env.outputs.environment }}
+        run: |
+          terragrunt run-all plan \
+            --terragrunt-non-interactive \
+            --terragrunt-include-external-dependencies \
+            -out=tfplan 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Post plan as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync(
+              'terraform/live/${{ needs.resolve-env.outputs.environment }}/plan_output.txt',
+              'utf8'
+            ).slice(0, 65000);
+            const body = `## 🏗️ Terragrunt Plan — \`${{ needs.resolve-env.outputs.environment }}\`
+            \`\`\`hcl
+            ${plan}
+            \`\`\`
+            *Triggered by @${{ github.actor }} on \`${{ github.ref_name }}\`*`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # ==============================================================
+  # Terragrunt Apply — push to branch only, never on PRs
+  # ==============================================================
+  apply:
+    name: "🚀 Apply (${{ needs.resolve-env.outputs.environment }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [resolve-env, plan]
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.resolve-env.outputs.action != 'destroy'
+    environment: ${{ needs.resolve-env.outputs.environment }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Setup Terragrunt
+        run: |
+          wget -qO /usr/local/bin/terragrunt \
+            https://github.com/gruntwork-io/terragrunt/releases/download/v${{ env.TERRAGRUNT_VERSION }}/terragrunt_linux_amd64
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Run-All Apply
+        working-directory: terraform/live/${{ needs.resolve-env.outputs.environment }}
+        run: |
+          terragrunt run-all apply \
+            --terragrunt-non-interactive \
+            --terragrunt-include-external-dependencies \
+            -auto-approve
+
+  # ==============================================================
+  # Terragrunt Destroy — manual dispatch only
+  # ==============================================================
+  destroy:
+    name: "💣 Destroy (${{ needs.resolve-env.outputs.environment }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [resolve-env, plan]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve-env.outputs.action == 'destroy'
+    environment: ${{ needs.resolve-env.outputs.environment }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Setup Terragrunt
+        run: |
+          wget -qO /usr/local/bin/terragrunt \
+            https://github.com/gruntwork-io/terragrunt/releases/download/v${{ env.TERRAGRUNT_VERSION }}/terragrunt_linux_amd64
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Run-All Destroy
+        working-directory: terraform/live/${{ needs.resolve-env.outputs.environment }}
+        run: |
+          terragrunt run-all destroy \
+            --terragrunt-non-interactive \
+            --terragrunt-include-external-dependencies \
+            -auto-approve

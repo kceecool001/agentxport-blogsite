@@ -1,17 +1,17 @@
 # ==============================================================
-# Jerney - DevSecOps CI/CD Pipeline
+# AgentXport - DevSecOps CI/CD Pipeline
 # ==============================================================
 # Triggers on every push and pull request.
-# Stages: Lint → SCA → Build → Image Scan → IaC Scan → Deploy Manifest Update
+# Stages: Lint+SCA → Build → Image Scan → IaC Scan → Deploy Manifest Update
 # ==============================================================
 
-name: Jerney DevSecOps Pipeline
+name: AgentXport DevSecOps Pipeline
 
 on:
   push:
-    branches: ["*"]
+    branches: [main, staging, develop, "feature/*", "hotfix/*"]
   pull_request:
-    branches: ["*"]
+    branches: [main, staging, develop]
 
 # Security: restrict default permissions to read-only
 permissions:
@@ -19,17 +19,17 @@ permissions:
 
 env:
   DOCKER_REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/jerney-backend
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/jerney-frontend
+  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/agentxport-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/agentxport-frontend
 
 jobs:
   # ==============================================================
-  # STAGE 1: Linting
+  # STAGE 1: Lint + SCA (combined to share npm ci)
   # ==============================================================
-  lint:
-    name: "🔍 Lint Code"
+  lint-sca:
+    name: "🔍 Lint & Audit (${{ matrix.component }})"
     runs-on: ubuntu-latest
-    continue-on-error: true
+    timeout-minutes: 15
     strategy:
       matrix:
         component: [backend, frontend]
@@ -50,15 +50,21 @@ jobs:
 
       - name: Run ESLint
         working-directory: ${{ matrix.component }}
+        continue-on-error: true  # Lint warnings should not block pipeline
         run: npm run lint
 
+      # Fail pipeline on high/critical vulnerabilities
+      - name: npm audit
+        working-directory: ${{ matrix.component }}
+        run: npm audit --audit-level=high
+
   # ==============================================================
-  # STAGE 2: Software Composition Analysis (SCA) — Dependency Audit
+  # STAGE 2: Dockerfile Lint (Hadolint) — blocks build
   # ==============================================================
-  sca:
-    name: "🛡️ Dependency Audit"
+  dockerfile-lint:
+    name: "📋 Dockerfile Lint (${{ matrix.component }})"
     runs-on: ubuntu-latest
-    needs: lint
+    timeout-minutes: 5
     strategy:
       matrix:
         component: [backend, frontend]
@@ -66,36 +72,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "${{ matrix.component }}/package-lock.json"
-
-      - name: Install dependencies
-        working-directory: ${{ matrix.component }}
-        run: npm ci
-
-      # npm audit for known vulnerabilities (fail on high/critical)
-      - name: npm audit
-        working-directory: ${{ matrix.component }}
-        run: npm audit --audit-level=high || true
-        # `|| true` to not fail on moderate — adjust in prod
+          dockerfile: ${{ matrix.component }}/Dockerfile
+          failure-threshold: warning
 
   # ==============================================================
   # STAGE 3: Build & Push Container Images
   # ==============================================================
   build:
-    name: "🐳 Build ${{ matrix.component }}"
+    name: "🐳 Build (${{ matrix.component }})"
     runs-on: ubuntu-latest
-    needs: sca
+    timeout-minutes: 20
+    needs: [lint-sca, dockerfile-lint]
     permissions:
       contents: read
-      packages: write # Needed to push to GHCR
+      packages: write
     strategy:
       matrix:
         component: [backend, frontend]
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -114,7 +112,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/jerney-${{ matrix.component }}
+          images: ghcr.io/${{ github.repository }}/agentxport-${{ matrix.component }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
@@ -130,18 +128,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Security: provenance and SBOM
           provenance: true
           sbom: true
 
   # ==============================================================
-  # STAGE 4: Container Image Scanning (Trivy)
+  # STAGE 4: Container Image Scanning (Trivy) — pulls pushed image
   # ==============================================================
   image-scan:
-    name: "🔬 Scan ${{ matrix.component }} Image"
+    name: "🔬 Scan (${{ matrix.component }}) Image"
     runs-on: ubuntu-latest
-    continue-on-error: true
+    timeout-minutes: 15
     needs: build
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: read
     strategy:
       matrix:
         component: [backend, frontend]
@@ -149,14 +150,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build image for scanning
-        run: |
-          docker build -t jerney-${{ matrix.component }}:scan ./${{ matrix.component }}
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: "jerney-${{ matrix.component }}:scan"
+          image-ref: "ghcr.io/${{ github.repository }}/agentxport-${{ matrix.component }}:${{ steps.sha.outputs.short }}"
           format: "table"
           exit-code: "1"
           ignore-unfixed: true
@@ -170,8 +178,9 @@ jobs:
   iac-scan:
     name: "🏗️ IaC Security Scan"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: lint-sca
     continue-on-error: true
-    needs: lint
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -182,7 +191,7 @@ jobs:
           directory: terraform/
           framework: terraform
           soft_fail: false
-          skip_check: CKV_AWS_39,CKV_AWS_58  # Public EKS endpoint (intentional for dev)
+          skip_check: CKV_AWS_39,CKV_AWS_58
           output_format: cli
 
       - name: Run Checkov on Kubernetes manifests
@@ -190,72 +199,59 @@ jobs:
         with:
           directory: k8s/
           framework: kubernetes
-          soft_fail: true  # Soft fail for K8s (some checks may not apply)
+          soft_fail: true
           output_format: cli
 
   # ==============================================================
-  # STAGE 6: Dockerfile Lint (Hadolint)
-  # ==============================================================
-  dockerfile-lint:
-    name: "📋 Dockerfile Lint"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      matrix:
-        component: [backend, frontend]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: ${{ matrix.component }}/Dockerfile
-          failure-threshold: warning
-
-  # ==============================================================
-  # STAGE 7: Update K8s Manifest with New Image Tag
-  # Only runs on push to main (not on PRs)
+  # STAGE 6: Update Kustomize overlay with new image tag
+  # develop → dev | staging → staging | main → prod
   # ==============================================================
   update-manifest:
-    name: "🚀 Update K8s Manifest"
+    name: "🚀 Update Manifest (${{ github.ref_name }})"
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' 
+    timeout-minutes: 10
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/staging' ||
+       github.ref == 'refs/heads/develop')
+    needs: [image-scan, iac-scan]
     permissions:
-      contents: write # Needed to push manifest changes
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve overlay environment
+        id: env
+        run: |
+          case "${{ github.ref_name }}" in
+            main)    echo "overlay=prod" >> $GITHUB_OUTPUT ;;
+            staging) echo "overlay=staging" >> $GITHUB_OUTPUT ;;
+            *)       echo "overlay=dev" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
       - name: Get short SHA
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Update K8s manifest with new image tags
+      - name: Update image tags in Kustomize overlay
         run: |
-          IMAGE_TAG=${{ steps.sha.outputs.short }}
+          OVERLAY=k8s/overlays/${{ steps.env.outputs.overlay }}/kustomization.yaml
+          yq e '(.images[] | select(.name == "*agentxport-backend")).newTag = "${{ steps.sha.outputs.short }}"' -i $OVERLAY
+          yq e '(.images[] | select(.name == "*agentxport-frontend")).newTag = "${{ steps.sha.outputs.short }}"' -i $OVERLAY
 
-          # Find the line number of the backend container image
-          # (the image: line right after `- name: backend`)
-          BACKEND_LINE=$(awk '/- name: backend/{found=1} found && /image:/{print NR; exit}' k8s/jerney.yaml)
-          echo "Backend image at line: ${BACKEND_LINE}"
-          sed -i "${BACKEND_LINE}s|.*|          image: ${BACKEND_IMAGE}:${IMAGE_TAG}|" k8s/jerney.yaml
-
-          # Find the line number of the frontend container image
-          # (the image: line right after `- name: frontend`)
-          FRONTEND_LINE=$(awk '/- name: frontend/{found=1} found && /image:/{print NR; exit}' k8s/jerney.yaml)
-          echo "Frontend image at line: ${FRONTEND_LINE}"
-          sed -i "${FRONTEND_LINE}s|.*|          image: ${FRONTEND_IMAGE}:${IMAGE_TAG}|" k8s/jerney.yaml
-
-          echo "✅ Updated images to tag: ${IMAGE_TAG}"
-          grep -n "image:" k8s/jerney.yaml
-
-      - name: Commit and push manifest update
+      - name: Commit and push manifest updates
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add k8s/jerney.yaml
-          git diff --cached --quiet || git commit -m "ci: update k8s images to ${{ steps.sha.outputs.short }} [skip ci]"
+          git add k8s/overlays/${{ steps.env.outputs.overlay }}/kustomization.yaml
+          git diff --cached --quiet || git commit -m "ci: update ${{ steps.env.outputs.overlay }} images to ${{ steps.sha.outputs.short }} [skip ci]"
           git push

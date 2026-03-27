@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agentxport-dev
+
+namePrefix: dev-
+
+resources:
+  - ../../base
+
+patches:
+  # Scale down replicas for dev
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: agentxport-backend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: agentxport-frontend
+
+images:
+  - name: ghcr.io/kceecool001/agentxport-blogsite/agentxport-backend
+    newTag: latest
+  - name: ghcr.io/kceecool001/agentxport-blogsite/agentxport-frontend
+    newTag: latest
+
+commonLabels:
+  environment: dev

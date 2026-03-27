@@ -1,20 +1,12 @@
-# 🛤️ Jerney — Blog Platform
+# 🚀 AgentXport — Blog Platform
 
-A Gen-Z vibe blog platform built with a 3-tier architecture — React frontend, Node.js backend, and PostgreSQL database.
+A Gen-Z vibe blog platform built on a 3-tier architecture with a full DevSecOps implementation.
 
-![Tech Stack](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react)
-![Tech Stack](https://img.shields.io/badge/Node.js-20-339933?style=flat-square&logo=node.js)
-![Tech Stack](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
-
----
-
-> [!IMPORTANT]
-> **Looking for the full DevSecOps implementation?**
-> Switch to the [`devops`](../../tree/devops) branch for Docker, Kubernetes (EKS Auto Mode), Terraform, CI/CD with GitHub Actions, container security scanning, and more.
->
-> ```bash
-> git checkout devops
-> ```
+![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react)
+![Node.js](https://img.shields.io/badge/Node.js-20-339933?style=flat-square&logo=node.js)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql)
+![Terraform](https://img.shields.io/badge/Terraform-1.10-7B42BC?style=flat-square&logo=terraform)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-1.32-326CE5?style=flat-square&logo=kubernetes)
 
 ---
 
@@ -26,129 +18,164 @@ A Gen-Z vibe blog platform built with a 3-tier architecture — React frontend, 
 - 💬 Comment on posts
 - 🎨 Gen-Z dark UI with glassmorphism and gradients
 
+---
+
 ## 🏗️ Architecture
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Frontend   │────▶│   Backend    │────▶│  PostgreSQL   │
-│   (React +   │◀────│  (Node.js +  │◀────│              │
-│    Nginx)    │     │   Express)   │     │              │
+│   Frontend   │────▶│   Backend    │────▶│  PostgreSQL  │
+│  (React +    │◀────│  (Node.js +  │◀────│              │
+│   Nginx)     │     │   Express)   │     │              │
 │   Port 80    │     │  Port 5000   │     │  Port 5432   │
 └──────────────┘     └──────────────┘     └──────────────┘
 ```
 
+---
+
 ## 📁 Project Structure
 
 ```
-Jerney/
-├── frontend/                # React (Vite) frontend
-│   ├── src/                 # React components & pages
-│   ├── nginx.conf           # Nginx config for serving the app
-│   └── package.json
-├── backend/                 # Node.js Express API
-│   ├── src/                 # Routes, DB connection
-│   └── package.json
-├── deploy/                  # EC2 deployment scripts
-│   ├── setup.sh             # One-click EC2 setup script
-│   └── jerney-nginx.conf    # Nginx reverse proxy config
-└── README.md
+agentxport-blogsite/
+├── .github/
+│   └── workflows/
+│       ├── ci-cd.yml           # App pipeline: lint → build → scan → deploy
+│       └── infra.yml           # Infra pipeline: checkov → plan → apply
+├── backend/                    # Node.js Express API
+│   ├── src/
+│   └── Dockerfile
+├── frontend/                   # React (Vite) + Nginx
+│   ├── src/
+│   ├── nginx.conf
+│   └── Dockerfile
+├── k8s/
+│   ├── base/                   # Kustomize base manifests
+│   │   ├── backend/
+│   │   ├── frontend/
+│   │   ├── database/
+│   │   ├── storage/
+│   │   └── networkpolicy/
+│   └── overlays/               # Per-environment overrides
+│       ├── dev/
+│       ├── staging/
+│       └── prod/
+├── terraform/
+│   ├── modules/                # Reusable Terraform modules
+│   │   ├── vpc/
+│   │   └── eks/
+│   └── live/                   # Terragrunt environment configs
+│       ├── terragrunt.hcl      # Root: shared backend + provider
+│       ├── dev/
+│       ├── staging/
+│       └── prod/
+├── deploy/                     # EC2 bare-metal deployment scripts
+└── docker-compose.yml          # Local development
 ```
 
 ---
 
-## 🚀 Deploy on AWS EC2
+## 🌿 Branching Strategy
+
+```
+feature/* ──┐
+hotfix/*  ──┤──▶ develop ──▶ staging ──▶ main
+            │
+            └── PR required for all merges
+```
+
+| Branch | Environment | Infra Action | App Action |
+|--------|-------------|--------------|------------|
+| `feature/*` | — | plan only | lint + build + scan |
+| `hotfix/*` | — | plan only | lint + build + scan |
+| `develop` | dev | plan + apply | build + update dev overlay |
+| `staging` | staging | plan + apply | build + update staging overlay |
+| `main` | prod | plan + apply | build + update prod overlay |
+
+---
+
+## 🔐 GitHub Secrets Required
+
+| Secret | Description |
+|--------|-------------|
+| `AWS_ACCESS_KEY_ID` | IAM user access key for Terraform + EKS |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `AWS_REGION` | Target AWS region (e.g. `eu-central-1`) |
+
+> `GITHUB_TOKEN` is provided automatically by GitHub Actions.
+
+### GitHub Environments
+
+Create 3 environments in `Settings → Environments`:
+- `dev`
+- `staging`
+- `prod` — add required reviewers for manual approval gate before apply
+
+---
+
+## ☁️ Infrastructure (Terragrunt + EKS Auto Mode)
 
 ### Prerequisites
 
-- An AWS EC2 instance running **Ubuntu 22.04+**
-- Security Group allowing inbound traffic on ports **22** (SSH) and **80** (HTTP)
-- SSH access to the instance
-
-### Step 1: Transfer the Code to EC2
+Before running the infra pipeline, the S3 backend must exist:
 
 ```bash
-# From your local machine
-scp -r -i your-key.pem ./Jerney ubuntu@<EC2_PUBLIC_IP>:~/Jerney
+aws s3api create-bucket \
+  --bucket agentxport-terraform-state \
+  --region eu-central-1 \
+  --create-bucket-configuration LocationConstraint=eu-central-1
+
+aws dynamodb create-table \
+  --table-name agentxport-tf-lock \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region eu-central-1
 ```
 
-### Step 2: SSH into the Instance
+### Manual Terragrunt commands
 
 ```bash
-ssh -i your-key.pem ubuntu@<EC2_PUBLIC_IP>
+# Plan a specific environment
+cd terraform/live/dev
+terragrunt run-all plan
+
+# Apply a specific environment
+cd terraform/live/staging
+terragrunt run-all apply
+
+# Destroy (careful!)
+cd terraform/live/dev
+terragrunt run-all destroy
 ```
 
-### Step 3: Run the Setup Script
-
-The `deploy/setup.sh` script installs everything and configures the app automatically:
+### Configure kubectl after apply
 
 ```bash
-cd ~/Jerney
-chmod +x deploy/setup.sh
-./deploy/setup.sh
-```
-
-This script will:
-1. Update system packages
-2. Install **Node.js 20.x**, **PostgreSQL 16**, **Nginx**, and **PM2**
-3. Create the database and user
-4. Install backend dependencies
-5. Build the React frontend
-6. Configure Nginx as a reverse proxy
-7. Start the backend with PM2 (auto-restarts on crash/reboot)
-
-### Step 4: Access the App
-
-Open your browser and go to:
-
-```
-http://<EC2_PUBLIC_IP>
-```
-
-### Useful Commands
-
-```bash
-pm2 status                          # Check backend status
-pm2 logs                            # View backend logs
-pm2 restart all                     # Restart backend
-sudo systemctl restart nginx        # Restart Nginx
-sudo -u postgres psql -d jerney_db  # Connect to database
+aws eks update-kubeconfig \
+  --region eu-central-1 \
+  --name agentxport-eks-<env>
 ```
 
 ---
 
-## 🧑‍💻 Local Development (Without Docker)
-
-### Prerequisites
-
-- Node.js 20+
-- PostgreSQL 16+
-
-### Backend
+## 🐳 Local Development
 
 ```bash
-cd backend
-npm install
-
-# Create a .env file (or export these variables)
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_USER=jerney_user
-export DB_PASSWORD=jerney_pass_2026
-export DB_NAME=jerney_db
-export PORT=5000
-
-npm start
+docker compose up --build
 ```
 
-### Frontend
+App available at `http://localhost`
+
+---
+
+## ☸️ Kubernetes Deployment (Kustomize)
 
 ```bash
-cd frontend
-npm install
-npm run dev
+# Apply a specific environment
+kubectl apply -k k8s/overlays/dev
+kubectl apply -k k8s/overlays/staging
+kubectl apply -k k8s/overlays/prod
 ```
-
-The Vite dev server starts on `http://localhost:3000` and proxies `/api` requests to the backend at `http://localhost:5000`.
 
 ---
 
@@ -166,15 +193,17 @@ The Vite dev server starts on `http://localhost:3000` and proxies `/api` request
 | POST | `/api/comments` | Create a comment |
 | DELETE | `/api/comments/:id` | Delete a comment |
 
-
 ---
 
-## 🌿 Branch Strategy
+## 🔒 Security Highlights
 
-| Branch | Purpose |
-|--------|---------|
-| `main` | Source code + EC2 bare-metal deployment |
-| `devops` | Full DevSecOps — Docker, Kubernetes (EKS), Terraform, CI/CD pipeline, security scanning |
-
----
-
+- Container images pinned to SHA256 digests
+- All containers run as non-root
+- `readOnlyRootFilesystem: true` on backend and frontend
+- All capabilities dropped (`capabilities.drop: [ALL]`)
+- NetworkPolicies enforce strict pod-to-pod traffic rules
+- EKS secrets encrypted at rest with KMS
+- Trivy image scanning on every build
+- Checkov IaC scanning on every Terraform change
+- Hadolint Dockerfile linting on every build
+- S3 Terraform state encrypted with DynamoDB locking

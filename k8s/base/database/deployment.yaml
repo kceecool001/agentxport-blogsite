@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentxport-db
+  namespace: agentxport
+  labels:
+    app.kubernetes.io/name: agentxport-db
+    app.kubernetes.io/part-of: agentxport
+    app.kubernetes.io/component: database
+    app.kubernetes.io/version: "1.0"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentxport-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentxport-db
+        app.kubernetes.io/part-of: agentxport
+        app.kubernetes.io/component: database
+        app.kubernetes.io/version: "1.0"
+    spec:
+      automountServiceAccountToken: false
+      tolerations:
+        - key: "karpenter.sh/disrupted"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: agentxport-db-secret
+          env:
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: agentxport-db-secret
+                  key: POSTGRES_USER
+            - name: PG_DB
+              valueFrom:
+                secretKeyRef:
+                  name: agentxport-db-secret
+                  key: POSTGRES_DB
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(PG_USER)", "-d", "$(PG_DB)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(PG_USER)", "-d", "$(PG_DB)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: agentxport-db-pvc

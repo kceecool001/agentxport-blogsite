@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentxport-backend
+  namespace: agentxport
+  labels:
+    app.kubernetes.io/name: agentxport-backend
+    app.kubernetes.io/part-of: agentxport
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/version: "1.0"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agentxport-backend
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP

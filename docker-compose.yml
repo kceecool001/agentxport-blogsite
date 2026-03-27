@@ -2,66 +2,90 @@ services:
   # ---- PostgreSQL Database ----
   db:
     image: postgres:16-alpine
-    container_name: jerney-db
+    container_name: agentxport-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: jerney_user
-      POSTGRES_PASSWORD: jerney_pass_2026
-      POSTGRES_DB: jerney_db
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: agentxport_user
+      POSTGRES_PASSWORD: agentxport_pass_2026
+      POSTGRES_DB: agentxport_db
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jerney_user -d jerney_db"]
+      test: ["CMD-SHELL", "pg_isready -U agentxport_user -d agentxport_db"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
-    # Security: read-only root filesystem where possible
     tmpfs:
       - /tmp
       - /run
+    networks:
+      - backend-net
 
   # ---- Backend API ----
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: jerney-backend
+    container_name: agentxport-backend
     restart: unless-stopped
     environment:
       PORT: "5000"
-      DB_USER: jerney_user
-      DB_PASSWORD: jerney_pass_2026
+      DB_USER: agentxport_user
+      DB_PASSWORD: agentxport_pass_2026
       DB_HOST: db
       DB_PORT: "5432"
-      DB_NAME: jerney_db
+      DB_NAME: agentxport_db
     expose:
       - "5000"
     depends_on:
       db:
         condition: service_healthy
-    # Security: do not run as root (already in Dockerfile, but enforced here too)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     security_opt:
       - no-new-privileges:true
     read_only: true
     tmpfs:
       - /tmp
+    networks:
+      - backend-net
+      - frontend-net
 
   # ---- Frontend (Nginx + React) ----
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: jerney-frontend
+    container_name: agentxport-frontend
     restart: unless-stopped
     ports:
       - "80:8080"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    networks:
+      - frontend-net
+
+networks:
+  backend-net:
+    driver: bridge
+  frontend-net:
+    driver: bridge
 
 volumes:
   pgdata:
