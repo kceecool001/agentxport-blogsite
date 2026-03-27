@@ -5,6 +5,7 @@
 
 locals {
   environment = basename(dirname(path_relative_to_include()))
+  aws_region  = "eu-central-1"
 }
 
 remote_state {
@@ -16,7 +17,7 @@ remote_state {
   config = {
     bucket         = "agentxport-terraform-state"
     key            = "${path_relative_to_include()}/terraform.tfstate"
-    region         = "eu-central-1"
+    region         = local.aws_region
     dynamodb_table = "agentxport-tf-lock"
     encrypt        = true
   }
@@ -37,7 +38,7 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region = "${local.aws_region}"
 
   default_tags {
     tags = {
