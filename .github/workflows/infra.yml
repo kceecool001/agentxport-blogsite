@@ -95,7 +95,6 @@ jobs:
           soft_fail: false
           skip_check: CKV_AWS_39,CKV_AWS_58
           output_format: cli
-          checkov_version: 3.2.0
 
   # ==============================================================
   # Terraform Format & Validate
